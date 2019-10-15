@@ -10,8 +10,8 @@ require_relative "lib/travis"
 module GitHub
   module_function
 
-  def update_check_run(check_run, data:)
-    open_api(check_run.fetch("url"), data: data)
+  def update_check_run(check_run:, data:)
+    open_api(check_run.fetch("url"), data: data, request_method: 'PATCH')
   end
 end
 
@@ -71,13 +71,24 @@ module Cask
               puts JSON.pretty_generate(event)
               puts "-" * 100
 
-              check_runs = GitHub.check_runs(pr: event.fetch("pull_request")).fetch("check_runs")
+              puts "EVENT: #{ENV["HOMEBREW_GITHUB_EVENT_NAME"]}"
+
+              puts "-" * 100
+
+              check_runs = case ENV["HOMEBREW_GITHUB_EVENT_NAME"]
+              when "pull_request"
+                check_runs = GitHub.check_runs(pr: event.fetch("pull_request")).fetch("check_runs")
+              when "check_run"
+                check_runs = [event.fetch("check_run")]
+              else
+                []
+              end
 
               puts JSON.pretty_generate(check_runs)
 
               puts "-" * 100
 
-              check_run = check_runs.detect { |check_run| check_run.fetch("name") == "ci" }
+              check_run = check_runs.detect { |check_run| check_run.fetch("name") == "Travis CI - Pull Request" }
               puts JSON.pretty_generate(check_run)
 
               offenses = json.fetch("files")
@@ -93,10 +104,10 @@ module Cask
                          end
                        end
 
-              GitHub.update_check_run(check_run, data: {
+              GitHub.update_check_run(check_run: check_run, data: {
                 output: {
                   title: 'RuboCop',
-                  summary: 'Style violations were found.',
+                  summary: "#{offenses.count} style violations were found.",
                   annotations: offenses,
                 }
               })
