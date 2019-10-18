@@ -13,12 +13,101 @@ module GitHub
   def update_check_run(check_run:, data:)
     open_api(check_run.fetch("url"), data: data, request_method: 'PATCH')
   end
+
+  def open_api(url, data: nil, request_method: nil, scopes: [].freeze)
+    # This is a no-op if the user is opting out of using the GitHub API.
+    return block_given? ? yield({}) : {} if ENV["HOMEBREW_NO_GITHUB_API"]
+
+    args = ["--header", "Accept: application/vnd.github.v3+json", "--write-out", "\n%\{http_code}"]
+    args += ["--header", "Accept: application/vnd.github.antiope-preview+json"]
+
+    token, username = api_credentials
+    case api_credentials_type
+    when :keychain
+      args += ["--user", "#{username}:#{token}"]
+    when :environment
+      authorization = if token.start_with?("token ") || token.start_with?("Bearer ")
+        token
+      else
+        "token #{token}"
+      end
+
+      args += ["--header", "Authorization: #{authorization}"]
+    end
+
+    data_tmpfile = nil
+    if data
+      begin
+        data = JSON.generate data
+        data_tmpfile = Tempfile.new("github_api_post", HOMEBREW_TEMP)
+      rescue JSON::ParserError => e
+        raise Error, "Failed to parse JSON request:\n#{e.message}\n#{data}", e.backtrace
+      end
+    end
+
+    headers_tmpfile = Tempfile.new("github_api_headers", HOMEBREW_TEMP)
+    begin
+      if data
+        data_tmpfile.write data
+        data_tmpfile.close
+        args += ["--data", "@#{data_tmpfile.path}"]
+
+        args += ["--request", request_method.to_s] if request_method
+      end
+
+      args += ["--dump-header", headers_tmpfile.path]
+
+      output, errors, status = curl_output("--location", url.to_s, *args, secrets: [token])
+      output, _, http_code = output.rpartition("\n")
+      output, _, http_code = output.rpartition("\n") if http_code == "000"
+      headers = headers_tmpfile.read
+    ensure
+      if data_tmpfile
+        data_tmpfile.close
+        data_tmpfile.unlink
+      end
+      headers_tmpfile.close
+      headers_tmpfile.unlink
+    end
+
+    begin
+      raise_api_error(output, errors, http_code, headers, scopes) if !http_code.start_with?("2") || !status.success?
+
+      return if http_code == "204" # No Content
+
+      json = JSON.parse output
+      if block_given?
+        yield json
+      else
+        json
+      end
+    rescue JSON::ParserError => e
+      raise Error, "Failed to parse JSON response\n#{e.message}", e.backtrace
+    end
+  end
 end
 
 module Cask
   class Cmd
     class Ci < AbstractCommand
       def run
+
+        Homebrew.install_gem! 'jwt'
+
+        require 'openssl'
+        require 'jwt'  # https://rubygems.org/gems/jwt
+
+        # Private key contents
+        private_pem = ENV.fetch("HOMEBREW_CASK_ANNOTATION_APP_KEY")
+        private_key = OpenSSL::PKey::RSA.new(private_pem)
+
+        # Generate the JWT
+        payload = { iat: Time.now.to_i, exp: Time.now.to_i + (10 * 60), iss: 43996 }
+
+        jwt = JWT.encode(payload, private_key, "RS256")
+
+        ENV["HOMEBREW_GITHUB_API_TOKEN"] = "Bearer #{jwt}"
+
         unless ENV.key?("CI")
           raise CaskError, "This command isn’t meant to be run locally."
         end
